@@ -13,6 +13,7 @@ struct Runner {
         storeSuite()
         editingSuite()
         exportSuite()
+        imageSuite()
         windowSuite()
         menuSuite()
 
@@ -107,53 +108,52 @@ struct Runner {
         }
 
         T.suite("Encrypted backup") {
-            T.test("a backup restores into a store with the same key") {
+            T.test("carries notes and images in one sealed file") {
                 let key = SymmetricKey(size: .bits256)
-                let live = root.appendingPathComponent("live")
-                let store = SecureStore(key: key, directory: live)
+                let png = TestImages.png(width: 40, height: 30)
+                let imageID = UUID()
 
-                var original = Note()
-                original.lines = [NoteLine(text: "the original note")]
-                try store.save(notes: [original])
+                var n = Note()
+                n.lines = [NoteLine(text: "with a picture"),
+                           NoteLine(imageID: imageID, pixelSize: CGSize(width: 40, height: 30))]
 
-                // Take the backup, then change the live notes.
-                let backup = root.appendingPathComponent("backup.spad")
-                try Data(contentsOf: store.fileURL).write(to: backup)
+                let archive = try BackupArchive.make(notes: [n], images: [imageID: png], key: key)
+                let restored = try BackupArchive.read(archive, key: key)
 
-                var replacement = Note()
-                replacement.lines = [NoteLine(text: "something else entirely")]
-                try store.save(notes: [replacement])
-                T.equal(try store.load().notes[0].lines[0].text, "something else entirely", "live store moved on")
-
-                T.expect(store.canOpen(backup), "the backup is readable with this key")
-                try store.replaceContents(withBackupAt: backup)
-                T.equal(try store.load().notes[0].lines[0].text, "the original note", "the backup is restored")
+                T.equal(restored.notes.count, 1, "the note comes back")
+                T.equal(restored.notes[0].lines[1].imageID, imageID, "the image row still points at its file")
+                T.equal(restored.images[imageID], png, "and the picture itself is inside the backup")
             }
 
-            T.test("keeps the pre-restore notes as a .bak") {
+            T.test("a backup is opaque and needs the right key") {
                 let key = SymmetricKey(size: .bits256)
-                let live = root.appendingPathComponent("bak")
-                let store = SecureStore(key: key, directory: live)
-                try store.save(notes: [Note()])
-                let backup = root.appendingPathComponent("second.spad")
-                try Data(contentsOf: store.fileURL).write(to: backup)
-                try store.replaceContents(withBackupAt: backup)
-                T.expect(FileManager.default.fileExists(atPath: store.fileURL.appendingPathExtension("bak").path),
-                         "the notes being replaced are still on disk")
-            }
+                let png = TestImages.png(width: 8, height: 8)
+                var n = Note()
+                n.lines = [NoteLine(text: "wifi password hunter2")]
+                let archive = try BackupArchive.make(notes: [n], images: [UUID(): png], key: key)
 
-            T.test("refuses a backup this key cannot open") {
-                let mine = root.appendingPathComponent("mine")
-                let theirs = root.appendingPathComponent("theirs")
-                let myStore = SecureStore(key: SymmetricKey(size: .bits256), directory: mine)
-                let theirStore = SecureStore(key: SymmetricKey(size: .bits256), directory: theirs)
-                try myStore.save(notes: [Note()])
-                try theirStore.save(notes: [Note()])
-
-                T.expect(!myStore.canOpen(theirStore.fileURL), "a foreign backup is detected before restoring")
-                T.throwsError("and installing it is refused") {
-                    try myStore.replaceContents(withBackupAt: theirStore.fileURL)
+                T.expect(archive.range(of: Data("hunter2".utf8)) == nil, "no readable note text")
+                T.expect(archive.range(of: png) == nil, "no raw image bytes either")
+                T.throwsError("another key cannot open it") {
+                    _ = try BackupArchive.read(archive, key: SymmetricKey(size: .bits256))
                 }
+            }
+
+            T.test("still opens backups written before images existed") {
+                let key = SymmetricKey(size: .bits256)
+                var payload = StorePayload()
+                var n = Note()
+                n.lines = [NoteLine(text: "an old note")]
+                payload.notes = [n]
+
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let legacy = try CryptoBox.seal(try encoder.encode(payload), key: key)
+
+                let restored = try BackupArchive.read(legacy, key: key)
+                T.equal(restored.notes.count, 1, "the old notes load")
+                T.equal(restored.notes[0].lines[0].text, "an old note", "with their text intact")
+                T.expect(restored.images.isEmpty, "and no images, as expected")
             }
 
             T.test("backup filenames are dated") {
@@ -161,6 +161,192 @@ struct Runner {
                 components.year = 2026; components.month = 9; components.day = 1
                 let date = Calendar(identifier: .gregorian).date(from: components)!
                 T.equal(NoteExporter.backupFilename(date: date), "Stick Pad Backup 2026-09-01.spad", "dated name")
+            }
+        }
+    }
+
+    // MARK: - Images
+
+    static func imageSuite() {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("stickpad-images-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        T.suite("Importing an image") {
+            T.test("keeps a small image at its own size") {
+                let png = TestImages.png(width: 120, height: 80)
+                guard let result = ImageImport.normalize(data: png) else {
+                    T.expect(false, "a valid PNG imports")
+                    return
+                }
+                T.equal(result.pixelSize, CGSize(width: 120, height: 80), "size is unchanged")
+            }
+
+            T.test("downsamples anything larger than the cap") {
+                let png = TestImages.png(width: 4000, height: 2000)
+                guard let result = ImageImport.normalize(data: png) else {
+                    T.expect(false, "a large PNG imports")
+                    return
+                }
+                T.equal(result.pixelSize.width, ImageImport.maxPixelDimension, "long edge is capped")
+                T.equal(result.pixelSize.height, ImageImport.maxPixelDimension / 2, "aspect ratio is kept")
+                T.expect(result.data.count < png.count, "and the stored bytes shrink")
+            }
+
+            T.test("rejects things that are not images") {
+                T.expect(ImageImport.normalize(data: Data("this is just text".utf8)) == nil,
+                         "text is not accepted as a picture")
+                T.expect(ImageImport.normalize(data: Data()) == nil, "nor is nothing")
+            }
+        }
+
+        T.suite("Image storage") {
+            T.test("images are encrypted on disk, one file each") {
+                let key = SymmetricKey(size: .bits256)
+                let store = AttachmentStore(key: key, directory: root.appendingPathComponent("sealed"))
+                let png = TestImages.png(width: 64, height: 64)
+                let id = UUID()
+
+                try store.write(png, id: id)
+                let onDisk = try Data(contentsOf: store.url(for: id))
+                T.expect(onDisk.range(of: png) == nil, "the raw picture is not on disk")
+                T.equal(Array(onDisk.prefix(4)), Array("SPAD".utf8), "it is a sealed Stick Pad file")
+                T.equal(try store.read(id: id), png, "and it decrypts back to the original")
+            }
+
+            T.test("an image file is owner-readable only") {
+                let store = AttachmentStore(key: SymmetricKey(size: .bits256),
+                                            directory: root.appendingPathComponent("perms"))
+                let id = UUID()
+                try store.write(TestImages.png(width: 8, height: 8), id: id)
+                let attrs = try FileManager.default.attributesOfItem(atPath: store.url(for: id).path)
+                T.equal((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600, "file mode is 600")
+            }
+
+            T.test("another key cannot read an image") {
+                let directory = root.appendingPathComponent("wrongkey")
+                let mine = AttachmentStore(key: SymmetricKey(size: .bits256), directory: directory)
+                let theirs = AttachmentStore(key: SymmetricKey(size: .bits256), directory: directory)
+                let id = UUID()
+                try mine.write(TestImages.png(width: 8, height: 8), id: id)
+                T.throwsError("a foreign key is refused") { _ = try theirs.read(id: id) }
+            }
+
+            T.test("unreferenced images are cleaned up, referenced ones kept") {
+                let store = AttachmentStore(key: SymmetricKey(size: .bits256),
+                                            directory: root.appendingPathComponent("prune"))
+                let keep = UUID(), drop = UUID()
+                try store.write(TestImages.png(width: 8, height: 8), id: keep)
+                try store.write(TestImages.png(width: 8, height: 8), id: drop)
+
+                let removed = store.pruneOrphans(keeping: [keep])
+                T.equal(removed, 1, "one orphan removed")
+                T.expect(store.exists(id: keep), "the referenced image survives")
+                T.expect(!store.exists(id: drop), "the orphan is gone")
+            }
+        }
+
+        T.suite("Image rows in a note") {
+            T.test("notes written before images existed still decode") {
+                let legacy = Data("""
+                {"id":"7B0E7C3E-5B1E-4E0E-9B7E-9C2F1A3D4E5F","text":"hello",\
+                "isCheckbox":true,"isChecked":false}
+                """.utf8)
+                guard let line = try? JSONDecoder().decode(NoteLine.self, from: legacy) else {
+                    T.expect(false, "an old note line decodes")
+                    return
+                }
+                T.equal(line.text, "hello", "text survives")
+                T.expect(line.isCheckbox, "checkbox survives")
+                T.expect(!line.isImage, "and it is not an image")
+                T.expect(line.imageID == nil, "with no attachment")
+            }
+
+            T.test("an image row reports its size and identity") {
+                let id = UUID()
+                let line = NoteLine(imageID: id, pixelSize: CGSize(width: 300, height: 150))
+                T.expect(line.isImage, "it is an image row")
+                T.equal(line.imagePixelSize, CGSize(width: 300, height: 150), "size round trips")
+            }
+
+            T.test("a damaged image row still lays out") {
+                var line = NoteLine(imageID: UUID(), pixelSize: CGSize(width: 100, height: 50))
+                line.imageWidth = 0
+                T.equal(line.imagePixelSize, CGSize(width: 1, height: 1), "falls back to a square")
+            }
+
+            T.test("a note of only images is still named and not empty") {
+                var n = Note()
+                n.lines = [NoteLine(imageID: UUID(), pixelSize: CGSize(width: 10, height: 10))]
+                T.equal(n.title, "Image note", "it gets a sensible title")
+                T.expect(!n.isEffectivelyEmpty, "and does not count as blank")
+                T.equal(n.imageIDs.count, 1, "its attachment is listed")
+            }
+        }
+
+        T.suite("Saving notes that contain images") {
+            T.test("Markdown links the picture, plain text notes it") {
+                let id = UUID()
+                var n = Note()
+                n.lines = [NoteLine(text: "Holiday"),
+                           NoteLine(imageID: id, pixelSize: CGSize(width: 10, height: 10))]
+
+                let md = NoteExporter.text(for: n, format: .markdown, imagePath: { _ in "Holiday images/a.png" })
+                T.equal(md, "Holiday\n![image](Holiday%20images/a.png)\n", "spaces are escaped in the link")
+
+                let txt = NoteExporter.text(for: n, format: .plainText, imagePath: { _ in "a.png" })
+                T.equal(txt, "Holiday\n[image: a.png]\n", "plain text names the file")
+
+                let orphan = NoteExporter.text(for: n, format: .markdown)
+                T.equal(orphan, "Holiday\n*(image)*\n", "a missing picture is still marked")
+            }
+
+            T.test("writing a note puts its images in a folder beside it") {
+                let id = UUID()
+                let png = TestImages.png(width: 20, height: 20)
+                var n = Note()
+                n.lines = [NoteLine(text: "Trip"),
+                           NoteLine(imageID: id, pixelSize: CGSize(width: 20, height: 20))]
+
+                let dir = root.appendingPathComponent("single")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let file = dir.appendingPathComponent("Trip.md")
+                try NoteExporter.write(note: n, to: file, format: .markdown, imageData: { $0 == id ? png : nil })
+
+                let imageFile = dir.appendingPathComponent("Trip images")
+                    .appendingPathComponent("\(id.uuidString.lowercased()).png")
+                T.expect(FileManager.default.fileExists(atPath: imageFile.path), "the picture is written out")
+                T.equal(try Data(contentsOf: imageFile), png, "unchanged")
+
+                let text = try String(contentsOf: file, encoding: .utf8)
+                T.expect(text.contains("Trip%20images/"), "and the note links to it")
+            }
+
+            T.test("a folder export shares one images directory") {
+                let id = UUID()
+                let png = TestImages.png(width: 12, height: 12)
+                var a = Note(); a.lines = [NoteLine(text: "One"),
+                                           NoteLine(imageID: id, pixelSize: CGSize(width: 12, height: 12))]
+                var b = Note(); b.lines = [NoteLine(text: "Two"),
+                                           NoteLine(imageID: id, pixelSize: CGSize(width: 12, height: 12))]
+
+                let dir = root.appendingPathComponent("folder")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let result = try NoteExporter.exportAll([a, b], into: dir, imageData: { $0 == id ? png : nil })
+
+                let images = try FileManager.default.contentsOfDirectory(
+                    atPath: result.folder.appendingPathComponent("images").path)
+                T.equal(images.count, 1, "a shared image is written once, not twice")
+
+                let text = try String(contentsOf: result.folder.appendingPathComponent("One.md"), encoding: .utf8)
+                T.expect(text.contains("images/"), "notes link into the shared folder")
+            }
+
+            T.test("names image files by their real format") {
+                let png = TestImages.png(width: 4, height: 4)
+                T.equal(NoteExporter.fileExtension(forImage: png), "png", "PNG is detected by signature")
+                T.equal(NoteExporter.fileExtension(forImage: Data([0xFF, 0xD8, 0xFF])), "jpg", "otherwise JPEG")
             }
         }
     }

@@ -8,6 +8,8 @@ extension Notification.Name {
     static let stickPadResetSize = Notification.Name("StickPadResetSize")
     static let stickPadOpenNote = Notification.Name("StickPadOpenNote")
     static let stickPadSaveNoteAs = Notification.Name("StickPadSaveNoteAs")
+    static let stickPadAddImage = Notification.Name("StickPadAddImage")
+    static let stickPadReportError = Notification.Name("StickPadReportError")
 }
 
 /// A note window. `nonactivatingPanel` + `.floating` is what keeps a note

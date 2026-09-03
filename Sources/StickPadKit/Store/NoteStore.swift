@@ -11,6 +11,8 @@ final class NoteStore: ObservableObject {
     @Published private(set) var loadError: String?
 
     private var secure: SecureStore?
+    private var attachments: AttachmentStore?
+    private var key: SymmetricKey?
     private var saveWork: DispatchWorkItem?
     private let saveDelay: TimeInterval = 0.5
 
@@ -18,6 +20,8 @@ final class NoteStore: ObservableObject {
 
     private struct LoadResult {
         var store: SecureStore?
+        var attachments: AttachmentStore?
+        var key: SymmetricKey?
         var notes: [Note] = []
         var error: String?
     }
@@ -33,8 +37,13 @@ final class NoteStore: ObservableObject {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.secure = result.store
+                    self.attachments = result.attachments
+                    self.key = result.key
                     self.notes = result.notes
                     self.loadError = result.error
+                    // Images belonging to notes that no longer exist are
+                    // dropped here rather than lingering on disk forever.
+                    if result.error == nil { self.pruneOrphanedImages() }
                     completion()
                 }
             }
@@ -45,8 +54,12 @@ final class NoteStore: ObservableObject {
         do {
             let key = try KeyStore.loadOrCreateKey()
             let store = SecureStore(key: key)
+            let attachments = AttachmentStore(key: key,
+                                              directory: SecureStore.defaultAttachmentsDirectory)
             let payload = try store.load()
             return LoadResult(store: store,
+                              attachments: attachments,
+                              key: key,
                               notes: payload.notes.sorted { $0.updatedAt > $1.updatedAt })
         } catch {
             return LoadResult(error: error.localizedDescription)
@@ -59,6 +72,8 @@ final class NoteStore: ObservableObject {
         cancelPendingSave()
         loadError = nil
         secure = nil
+        attachments = nil
+        key = nil
         notes = []
         bootstrap(completion: completion)
     }
@@ -70,13 +85,34 @@ final class NoteStore: ObservableObject {
         secure?.canOpen(url) ?? false
     }
 
+    /// Seals every note *and* every image into one portable file.
+    func makeBackup() throws -> Data {
+        guard let key else { throw ImageError.storeUnavailable }
+        var images: [UUID: Data] = [:]
+        for id in Set(notes.flatMap(\.imageIDs)) {
+            if let data = try? attachments?.read(id: id) { images[id] = data }
+        }
+        return try BackupArchive.make(notes: notes, images: images, key: key)
+    }
+
     /// Installs a backup over the live store and reloads. The caller is
     /// expected to have confirmed with the user first.
     func restore(fromBackupAt url: URL, completion: @escaping @MainActor () -> Void) throws {
-        guard let secure else { throw ExportError.noNotes }
+        guard let secure, let attachments, let key else { throw ImageError.storeUnavailable }
+
+        let contents = try BackupArchive.read(try Data(contentsOf: url), key: key)
+
         flush()                 // the pre-restore state becomes the .bak
         cancelPendingSave()     // and nothing queued may overwrite what we install
-        try secure.replaceContents(withBackupAt: url)
+
+        try secure.save(notes: contents.notes)
+        for (id, data) in contents.images {
+            try attachments.write(data, id: id)
+        }
+        // Images belonging only to the replaced notes are no longer referenced.
+        attachments.pruneOrphans(keeping: Set(contents.notes.flatMap(\.imageIDs)))
+
+        ImageCache.shared.forget(Array(contents.images.keys))
         reload(completion: completion)
     }
 
@@ -115,6 +151,7 @@ final class NoteStore: ObservableObject {
 
     func delete(id: UUID) {
         notes.removeAll { $0.id == id }
+        pruneOrphanedImages()
         scheduleSave()
     }
 
@@ -129,6 +166,44 @@ final class NoteStore: ObservableObject {
     private func preferredNewColor() -> String {
         notes.max(by: { $0.updatedAt < $1.updatedAt })?.colorID ?? NotePalette.defaultColorID
     }
+
+    // MARK: - Images
+
+    /// Seals an image into its own attachment file and returns the id to store
+    /// on the note line. The bytes are normalised first: rotated upright,
+    /// downsampled, and re-encoded.
+    func addImage(data: Data) throws -> (id: UUID, pixelSize: CGSize) {
+        guard let attachments else { throw ImageError.storeUnavailable }
+        guard !isReadOnly else { throw ImageError.storeLocked }
+        guard let normalized = ImageImport.normalize(data: data) else { throw ImageError.unreadable }
+
+        let id = UUID()
+        try attachments.write(normalized.data, id: id)
+        return (id, normalized.pixelSize)
+    }
+
+    func addImage(contentsOf url: URL) throws -> (id: UUID, pixelSize: CGSize) {
+        guard let attachments else { throw ImageError.storeUnavailable }
+        guard !isReadOnly else { throw ImageError.storeLocked }
+        guard let normalized = ImageImport.normalize(contentsOf: url) else { throw ImageError.unreadable }
+
+        let id = UUID()
+        try attachments.write(normalized.data, id: id)
+        return (id, normalized.pixelSize)
+    }
+
+    func imageData(for id: UUID) -> Data? {
+        try? attachments?.read(id: id)
+    }
+
+    /// Deletes attachment files nothing points at any more.
+    func pruneOrphanedImages() {
+        guard let attachments, !isReadOnly else { return }
+        let referenced = Set(notes.flatMap(\.imageIDs))
+        attachments.pruneOrphans(keeping: referenced)
+    }
+
+    var imageBytesOnDisk: Int { attachments?.totalBytesOnDisk ?? 0 }
 
     // MARK: - Persistence
 

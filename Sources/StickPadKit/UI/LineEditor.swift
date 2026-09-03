@@ -6,6 +6,20 @@ import SwiftUI
 /// available for caret-aware arrow navigation between rows.
 final class LineTextView: NSTextView {
     var onBecomeFirstResponder: (() -> Void)?
+    /// Returns true when the paste was consumed as an image.
+    var onPasteImage: ((Data) -> Bool)?
+
+    /// Command-V with a picture on the clipboard adds it to the note rather
+    /// than pasting nothing (an NSTextView with rich text off drops images).
+    override func paste(_ sender: Any?) {
+        if let handler = onPasteImage,
+           NSPasteboard.general.containsImage,
+           let data = NSPasteboard.general.stickPadImageData(),
+           handler(data) {
+            return
+        }
+        super.paste(sender)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
@@ -48,6 +62,7 @@ struct LineEditor: NSViewRepresentable {
     var onBackspaceAtStart: () -> Void
     var onMoveUp: () -> Void
     var onMoveDown: () -> Void
+    var onPasteImage: (Data) -> Bool
 
     func makeNSView(context: Context) -> LineTextView {
         // Explicit TextKit 1 stack.
@@ -76,6 +91,7 @@ struct LineEditor: NSViewRepresentable {
         view.usesFindBar = false
         view.setContentHuggingPriority(.defaultHigh, for: .vertical)
         view.onBecomeFirstResponder = { onFocused() }
+        view.onPasteImage = { data in onPasteImage(data) }
 
         context.coordinator.textView = view
         view.string = text
@@ -85,6 +101,7 @@ struct LineEditor: NSViewRepresentable {
 
     func updateNSView(_ view: LineTextView, context: Context) {
         context.coordinator.parent = self
+        view.onPasteImage = { [onPasteImage] data in onPasteImage(data) }
 
         if view.string != text {
             let selected = view.selectedRange()

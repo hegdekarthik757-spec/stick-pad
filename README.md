@@ -38,6 +38,9 @@ and lines wrap rather than scrolling sideways.
   one it's on.
 - Click the empty space below the last line to keep writing.
 - Paste multi-line text and it splits into separate lines.
+- **Drag an image onto a note**, paste one with `⌘V`, or use `⌘I` to pick files.
+  Hover an image to get the × that removes it, or press Backspace at the start
+  of the line below it.
 
 The header buttons — visible on hover, faint otherwise — toggle a checkbox,
 open the colour palette, pin the note, and open the rest of the options. The
@@ -51,6 +54,7 @@ red close button hides a note; deleting is separate and always asks first.
 | `⌘S` | Save the front note as a file |
 | `⇧⌘S` | Save all notes to a folder |
 | `⌘W` | Close the front note (it isn't deleted) |
+| `⌘I` | Add an image |
 | `⌘L` | Toggle a checkbox on the current line |
 | `⌘K` | Next colour |
 | `⌘T` | Keep on top, on or off |
@@ -85,6 +89,30 @@ Deleting is permanent and always confirms first.
 Closing every note doesn't quit the app; it stays in the menu bar. Quit with
 `⌘Q`.
 
+## Images
+
+Drop an image onto a note, paste one, or pick files with `⌘I`. Images sit
+inline as their own rows, scaled to the note's width and capped in height so
+one picture can't swallow a 4 × 6 inch note.
+
+**Images are encrypted the same way your text is.** Each one is sealed
+individually with AES-256-GCM under the same key and written to:
+
+```
+~/Library/Application Support/StickPad/Attachments/<id>.spadimg
+```
+
+They deliberately do *not* live inside `notes.spad`. That file is rewritten on a
+debounce every time you type, and re-encrypting several megabytes of photos on
+every keystroke would make typing crawl. An attachment is written once and then
+only read. Files nothing refers to any more are deleted — when you remove an
+image, delete a note, or next time the app starts.
+
+On the way in, an image is rotated upright from its EXIF orientation and
+downsampled so its longest edge is at most 2048 pixels. Pictures with
+transparency are kept as PNG; everything else becomes JPEG, which is
+dramatically smaller for photographs. Anything above 60 MB is refused.
+
 ## Saving notes as files
 
 Notes save themselves into the encrypted store as you type — there is no "save"
@@ -95,7 +123,7 @@ somewhere you choose.
 | --- | --- |
 | **File ▸ Save Note As…** (`⌘S`) | The front note, as Markdown or plain text |
 | **File ▸ Save All Notes to a Folder…** (`⇧⌘S`) | Every note, one Markdown file each |
-| **Security ▸ Save Encrypted Backup…** | The whole store, still encrypted |
+| **Security ▸ Save Encrypted Backup…** | Every note *and image*, still encrypted |
 
 Checklists survive the trip. Markdown uses task-list syntax, which most editors
 render as real checkboxes:
@@ -107,6 +135,11 @@ Weekend
 ```
 
 Plain text uses `[x]` / `[ ]` instead.
+
+Images come along too. Saving a single note writes its pictures into a
+`<note name> images/` folder beside the file; a folder export puts them all in
+one shared `images/` directory, so an image used by two notes is written once.
+The exported Markdown links to them, so it renders with the pictures in place.
 
 **Saving to Markdown or text writes readable, unencrypted files.** That's the
 point of the feature — the file needs to be usable in other apps — but it does
@@ -121,15 +154,16 @@ anything already sitting there, and notes that share a title get distinct names.
 
 ### Backing up and restoring
 
-**Security ▸ Save Encrypted Backup…** writes a copy of the sealed store, still
-encrypted, wherever you like — a USB stick, an external drive, a cloud folder.
+**Security ▸ Save Encrypted Backup…** seals every note *and every image* into a
+single portable file, still encrypted, wherever you like — a USB stick, an external drive, a cloud folder.
 **Restore from Encrypted Backup…** puts one back.
 
 Restoring replaces everything currently in Stick Pad, so it confirms first, and
 the notes being replaced are kept next to the store as `notes.spad.bak`. A
 backup written on a different Mac is checked *before* anything is replaced: if
 your key can't open it you get told to import the matching key first, rather
-than ending up with notes you can't read.
+than ending up with notes you can't read. Backups made before images existed
+still restore.
 
 ## Encryption
 
@@ -186,13 +220,14 @@ privileges. Full-disk encryption and a locked screen still matter.
 ./build.sh --test
 ```
 
-103 checks covering the crypto (round trips, wrong keys, tampered ciphertext and
+153 checks covering the crypto (round trips, wrong keys, tampered ciphertext and
 headers, nonce reuse), the encrypted store (opacity on disk, file permissions,
 backups, key mismatches), the editing model (Return/Backspace semantics,
-checkboxes, paste splitting, navigation), saving to files (Markdown and text
-rendering, filename sanitising, collision handling, backup and restore) and real
-AppKit window behaviour (floating level, 4 × 6 size, non-activating focus,
-Spaces).
+checkboxes, paste splitting, navigation), images (downsampling, sealed
+attachment files, orphan cleanup, decoding notes written before images existed),
+saving to files (Markdown and text rendering, image folders, filename
+sanitising, collision handling, backup and restore) and real AppKit window
+behaviour (floating level, 4 × 6 size, non-activating focus, Spaces).
 
 XCTest ships with Xcode, and this project builds with the Command Line Tools
 alone, so the suite runs as a plain executable (`Sources/StickPadTests`) with a
@@ -206,6 +241,7 @@ Sources/
   StickPadKit/          Everything: models, encrypted store, UI
     Model/              Note, lines, colours, geometry, editing model
     Store/              KeyStore (Keychain), CryptoBox (AES-GCM), SecureStore,
+                        AttachmentStore (sealed images), BackupArchive,
                         NoteStore, NoteExporter (saving to files)
     UI/                 Note panel, note view, line editor, notes list, menus
     AppDelegate.swift   Lifecycle, windows, key import/export

@@ -96,6 +96,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         center.addObserver(forName: .stickPadSaveNoteAs, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { self.saveFrontNoteAs(nil) }
         }
+        center.addObserver(forName: .stickPadAddImage, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { self.addImageToFrontNote(nil) }
+        }
+        center.addObserver(forName: .stickPadReportError, object: nil, queue: .main) { note in
+            guard let message = note.userInfo?["message"] as? String else { return }
+            MainActor.assumeIsolated { self.presentMessage("Couldn't add that image", message) }
+        }
     }
 
     // MARK: - Note windows
@@ -229,6 +236,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bringNotesToFront(nil)
     }
 
+    @objc func addImageToFrontNote(_ sender: Any?) {
+        guard let controller = frontmostController else { NSSound.beep(); return }
+        guard !store.isReadOnly else {
+            presentError(ImageError.storeLocked)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = ImageImport.acceptedTypes
+        panel.prompt = "Add"
+        panel.message = "Images are encrypted alongside your notes."
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK else { return }
+            let target = controller.doc.focus?.lineID
+            for url in panel.urls {
+                controller.doc.insertImage(contentsOf: url, after: target)
+            }
+        }
+
+        if controller.panel.isVisible {
+            panel.beginSheetModal(for: controller.panel) { response in
+                MainActor.assumeIsolated { finish(response) }
+            }
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
     // MARK: - Saving to a file
 
     /// Notes save themselves continuously into the encrypted store; this is for
@@ -252,8 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
             do {
-                let data = NoteExporter.data(for: controller.doc.note, format: accessory.format)
-                try data.write(to: url, options: [.atomic])
+                try NoteExporter.write(note: controller.doc.note, to: url,
+                                       format: accessory.format,
+                                       imageData: { self.store.imageData(for: $0) })
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } catch {
                 self.presentError(error)
@@ -288,7 +329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         do {
             let ordered = store.notes.sorted { $0.updatedAt > $1.updatedAt }
-            let result = try NoteExporter.exportAll(ordered, into: directory)
+            let result = try NoteExporter.exportAll(ordered, into: directory,
+                                                    imageData: { self.store.imageData(for: $0) })
             NSWorkspace.shared.activateFileViewerSelecting([result.folder])
         } catch {
             presentError(error)
@@ -296,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func saveEncryptedBackup(_ sender: Any?) {
-        guard let source = store.storeLocation, FileManager.default.fileExists(atPath: source.path) else {
+        guard !store.notes.isEmpty else {
             presentError(ExportError.noNotes)
             return
         }
@@ -308,10 +350,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canCreateDirectories = true
         panel.message = "The backup stays encrypted. Opening it on another Mac also needs your "
             + "encryption key, which you can export from this menu."
+        panel.message += " Images in your notes are included."
 
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
-            try Data(contentsOf: source).write(to: destination, options: [.atomic])
+            try store.makeBackup().write(to: destination, options: [.atomic])
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         } catch {
             presentError(error)
@@ -470,6 +513,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertSecondButtonReturn {
             importKey(nil)
         }
+    }
+
+    private func presentMessage(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func presentError(_ error: Error) {

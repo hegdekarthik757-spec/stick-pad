@@ -20,6 +20,9 @@ final class NoteDocument: ObservableObject {
     @Published var focus: FocusTarget?
 
     private weak var store: NoteStore?
+    /// Surfaces an image that could not be added, e.g. an unreadable file.
+    @Published var imageError: String?
+    private var needsImagePrune = false
 
     init(note: Note, store: NoteStore?) {
         self.note = note
@@ -85,6 +88,7 @@ final class NoteDocument: ObservableObject {
     /// Backspace at the very start of a line: unwrap a checkbox first, then
     /// merge into the line above.
     func backspaceAtStart(of id: UUID) {
+        needsImagePrune = false
         edit { note in
             guard let i = note.index(of: id) else { return }
             if note.lines[i].isCheckbox {
@@ -94,10 +98,22 @@ final class NoteDocument: ObservableObject {
                 return
             }
             guard i > 0 else { return }
+            // There is nothing to merge into an image, so backspacing against
+            // one deletes the picture instead.
+            if note.lines[i - 1].isImage {
+                note.lines.remove(at: i - 1)
+                self.focus = FocusTarget(lineID: id, caret: .start)
+                self.needsImagePrune = true
+                return
+            }
             let removed = note.lines.remove(at: i)
             let mergeOffset = note.lines[i - 1].text.count
             note.lines[i - 1].text += removed.text
             self.focus = FocusTarget(lineID: note.lines[i - 1].id, caret: .offset(mergeOffset))
+        }
+        if needsImagePrune {
+            needsImagePrune = false
+            store?.pruneOrphanedImages()
         }
     }
 
@@ -141,7 +157,7 @@ final class NoteDocument: ObservableObject {
 
     func clearCompleted() {
         edit { note in
-            note.lines.removeAll { $0.isCheckbox && $0.isChecked }
+            note.lines.removeAll { $0.isCheckbox && $0.isChecked && !$0.isImage }
             if note.lines.isEmpty { note.lines = [NoteLine()] }
         }
     }
@@ -158,6 +174,87 @@ final class NoteDocument: ObservableObject {
             self.focus = FocusTarget(lineID: new.id, caret: .start)
         }
     }
+
+    // MARK: - Images
+
+    /// Inserts an image below `lineID`, or at the end when that is nil. An
+    /// empty text row is left after it so there is always somewhere to type.
+    func insertImage(data: Data, after lineID: UUID?) {
+        guard let store else { return }
+        do {
+            guard data.count <= ImageError.maximumSourceBytes else {
+                throw ImageError.tooLarge(data.count)
+            }
+            let added = try store.addImage(data: data)
+            place(imageID: added.id, pixelSize: added.pixelSize, after: lineID)
+        } catch {
+            report(error)
+        }
+    }
+
+    func insertImage(contentsOf url: URL, after lineID: UUID?) {
+        guard let store else { return }
+        do {
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
+            if let size, size > ImageError.maximumSourceBytes {
+                throw ImageError.tooLarge(size)
+            }
+            let added = try store.addImage(contentsOf: url)
+            place(imageID: added.id, pixelSize: added.pixelSize, after: lineID)
+        } catch {
+            report(error)
+        }
+    }
+
+    private func report(_ error: Error) {
+        imageError = error.localizedDescription
+        NotificationCenter.default.post(name: .stickPadReportError, object: nil,
+                                        userInfo: ["message": error.localizedDescription])
+    }
+
+    private func place(imageID: UUID, pixelSize: CGSize, after lineID: UUID?) {
+        edit { note in
+            let row = NoteLine(imageID: imageID, pixelSize: pixelSize)
+            let insertAt: Int
+            if let lineID, let i = note.index(of: lineID) {
+                insertAt = i + 1
+                // Dropping onto a blank row replaces it rather than leaving a gap.
+                if !note.lines[i].isImage && note.lines[i].text.isEmpty {
+                    note.lines.remove(at: i)
+                    note.lines.insert(row, at: i)
+                    self.ensureTrailingTextRow(&note)
+                    return
+                }
+            } else {
+                insertAt = note.lines.count
+            }
+            note.lines.insert(row, at: insertAt)
+            self.ensureTrailingTextRow(&note)
+        }
+    }
+
+    /// An image as the last row would leave nowhere to put the caret.
+    private func ensureTrailingTextRow(_ note: inout Note) {
+        if note.lines.last?.isImage ?? true {
+            let row = NoteLine()
+            note.lines.append(row)
+            self.focus = FocusTarget(lineID: row.id, caret: .start)
+        } else if let last = note.lines.last {
+            self.focus = FocusTarget(lineID: last.id, caret: .end)
+        }
+    }
+
+    func removeImage(_ lineID: UUID) {
+        edit { note in
+            guard let i = note.index(of: lineID), note.lines[i].isImage else { return }
+            note.lines.remove(at: i)
+            if note.lines.isEmpty { note.lines = [NoteLine()] }
+        }
+        // The attachment file goes as soon as nothing refers to it.
+        store?.pruneOrphanedImages()
+    }
+
+    func imageData(for id: UUID) -> Data? { store?.imageData(for: id) }
 
     // MARK: - Appearance
 

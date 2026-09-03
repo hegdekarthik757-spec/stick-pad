@@ -27,6 +27,10 @@ struct SecureStore {
         return base.appendingPathComponent("StickPad", isDirectory: true)
     }
 
+    static var defaultAttachmentsDirectory: URL {
+        defaultDirectory.appendingPathComponent("Attachments", isDirectory: true)
+    }
+
     var storeExists: Bool { FileManager.default.fileExists(atPath: fileURL.path) }
 
     func load() throws -> StorePayload {
@@ -44,15 +48,6 @@ struct SecureStore {
     func canOpen(_ url: URL) -> Bool {
         guard let envelope = try? Data(contentsOf: url) else { return false }
         return (try? CryptoBox.open(envelope, key: key)) != nil
-    }
-
-    /// Puts a backup in place, keeping the current store as `.bak`.
-    func replaceContents(withBackupAt url: URL) throws {
-        let envelope = try Data(contentsOf: url)
-        _ = try CryptoBox.open(envelope, key: key)  // refuse to install something unreadable
-        backupCurrentFile()
-        try envelope.write(to: fileURL, options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
     private func backupCurrentFile() {

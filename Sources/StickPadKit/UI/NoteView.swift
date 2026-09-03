@@ -1,10 +1,12 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct NoteView: View {
     @ObservedObject var doc: NoteDocument
     @State private var isHovering = false
     @State private var showingPalette = false
+    @State private var isDropTarget = false
 
     private var color: NoteColor { doc.note.color }
 
@@ -72,6 +74,10 @@ struct NoteView: View {
                 Button("Bigger Text") { doc.setFontSize(doc.note.fontSize + 1) }
                 Button("Smaller Text") { doc.setFontSize(doc.note.fontSize - 1) }
                 Divider()
+                Button("Add Image…") {
+                    NotificationCenter.default.post(name: .stickPadAddImage, object: nil)
+                }
+                Divider()
                 Button("Save Note As…") {
                     NotificationCenter.default.post(name: .stickPadSaveNoteAs, object: nil)
                 }
@@ -120,25 +126,74 @@ struct NoteView: View {
     // MARK: - Lines
 
     private var body_: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(doc.note.lines) { line in
-                    lineRow(line)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(doc.note.lines) { line in
+                        lineRow(line, contentWidth: max(geometry.size.width - 28, 40))
+                    }
+                    // Clicking the empty space under the last line keeps writing.
+                    Color.clear
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
+                        .onTapGesture { doc.focusLastLine() }
                 }
-                // Clicking the empty space under the last line keeps writing.
-                Color.clear
-                    .frame(minHeight: 28)
-                    .contentShape(Rectangle())
-                    .onTapGesture { doc.focusLastLine() }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 4)
+            .scrollContentBackground(.hidden)
         }
-        .scrollContentBackground(.hidden)
+        .overlay {
+            if isDropTarget {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(color.ink.opacity(0.45), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.image, .fileURL], isTargeted: $isDropTarget) { providers in
+            receive(providers)
+        }
     }
 
-    private func lineRow(_ line: NoteLine) -> some View {
+    /// Accepts images dragged in from Finder, Photos, a browser, anywhere.
+    private func receive(_ providers: [NSItemProvider]) -> Bool {
+        let target = doc.focus?.lineID
+        var accepted = false
+
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                accepted = true
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { doc.insertImage(contentsOf: url, after: target) }
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                accepted = true
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    guard let data else { return }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { doc.insertImage(data: data, after: target) }
+                    }
+                }
+            }
+        }
+        return accepted
+    }
+
+    @ViewBuilder
+    private func lineRow(_ line: NoteLine, contentWidth: CGFloat) -> some View {
+        if line.isImage {
+            ImageRowView(doc: doc, line: line, color: color, availableWidth: contentWidth)
+        } else {
+            textRow(line)
+        }
+    }
+
+    private func textRow(_ line: NoteLine) -> some View {
         HStack(alignment: .top, spacing: 7) {
             if line.isCheckbox {
                 Button {
@@ -172,7 +227,11 @@ struct NoteView: View {
                 onNewline: { doc.insertLine(after: line.id) },
                 onBackspaceAtStart: { doc.backspaceAtStart(of: line.id) },
                 onMoveUp: { doc.moveFocus(from: line.id, by: -1) },
-                onMoveDown: { doc.moveFocus(from: line.id, by: 1) }
+                onMoveDown: { doc.moveFocus(from: line.id, by: 1) },
+                onPasteImage: { data in
+                    doc.insertImage(data: data, after: line.id)
+                    return true
+                }
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         }

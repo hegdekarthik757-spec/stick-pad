@@ -54,6 +54,8 @@ enum MainMenu {
         // Note
         let noteItem = NSMenuItem()
         let noteMenu = NSMenu(title: "Note")
+        noteMenu.addItem(withTitle: "Add Image…", action: #selector(AppDelegate.addImageToFrontNote(_:)), keyEquivalent: "i")
+        noteMenu.addItem(.separator())
         noteMenu.addItem(withTitle: "Toggle Checkbox", action: #selector(AppDelegate.toggleCheckboxOnFrontNote(_:)), keyEquivalent: "l")
         noteMenu.addItem(withTitle: "Next Colour", action: #selector(AppDelegate.cycleFrontNoteColor(_:)), keyEquivalent: "k")
         noteMenu.addItem(withTitle: "Keep on Top", action: #selector(AppDelegate.togglePinOnFrontNote(_:)), keyEquivalent: "t")
