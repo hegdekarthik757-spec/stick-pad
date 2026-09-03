@@ -4,6 +4,9 @@
 #   ./build.sh --run    build, then launch it
 #   ./build.sh --install  build, then copy into /Applications
 #   ./build.sh --test   run the test suite only
+#   ./build.sh --dmg    build, then package a drag-to-install disk image
+#   ./build.sh --pkg    build, then package an installer .pkg
+#   ./build.sh --dist   build both the .dmg and the .pkg
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -61,9 +64,45 @@ PLIST
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Clears quarantine and similar attributes picked up when sources were
+# downloaded. (com.apple.provenance is system-managed and stays put; it rides
+# along in the .pkg payload as an AppleDouble entry, which is normal — every
+# installed Mac app carries it.)
+xattr -cr "$APP" 2>/dev/null || true
+
 echo "==> Signing (ad-hoc)"
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
     echo "    (ad-hoc signing skipped — the app still runs)"
+
+package_dmg() {
+    local staging="$OUT/dmg"
+    local dmg="$OUT/$APP_NAME $VERSION.dmg"
+    echo "==> Packaging disk image"
+    rm -rf "$staging" "$dmg"
+    mkdir -p "$staging"
+    cp -R "$APP" "$staging/"
+    # The Applications symlink is what makes it a drag-to-install window.
+    ln -s /Applications "$staging/Applications"
+    hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$staging" \
+        -ov -format UDZO "$dmg"
+    rm -rf "$staging"
+    echo "    $dmg"
+}
+
+package_pkg() {
+    local pkg="$OUT/$APP_NAME $VERSION.pkg"
+    echo "==> Packaging installer"
+    rm -f "$pkg"
+    productbuild --component "$APP" /Applications \
+        --identifier "$BUNDLE_ID.pkg" --version "$VERSION" "$pkg" >/dev/null
+    echo "    $pkg"
+}
+
+case "${1:-}" in
+    --dmg)  package_dmg ;;
+    --pkg)  package_pkg ;;
+    --dist) package_dmg; package_pkg ;;
+esac
 
 if [[ "${1:-}" == "--install" ]]; then
     echo "==> Installing to /Applications"

@@ -21,6 +21,9 @@ launches it. Other modes:
 | `./build.sh --run` | Build, then launch |
 | `./build.sh --install` | Build, copy into `/Applications`, launch |
 | `./build.sh --test` | Run the test suite |
+| `./build.sh --dmg` | Package a drag-to-install `.dmg` |
+| `./build.sh --pkg` | Package an installer `.pkg` |
+| `./build.sh --dist` | Both of the above |
 
 Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
 Full Xcode is not needed.
@@ -256,6 +259,18 @@ is an `NSTextView` on an explicit TextKit 1 stack, which is what makes
 caret-aware arrow navigation between lines and per-line height measurement
 possible. SwiftUI's `TextField` can't wrap, and a single `TextEditor` can't give
 individual lines their own checkboxes.
+
+## Giving it to other people
+
+`./build.sh --dist` produces `build/Stick Pad 1.0.dmg` (drag-to-Applications)
+and `build/Stick Pad 1.0.pkg` (double-click installer). Both are ad-hoc signed,
+so on another Mac they need right-click ▸ **Open** the first time.
+
+For anything beyond your own machine — a signed and notarised download, or the
+Mac App Store — see **[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)**. The short
+version: notarising needs an Apple Developer membership and three commands; the
+App Store additionally needs the app sandboxed, which is a real code change and
+moves where notes are stored.
 
 ## Two things to know
 

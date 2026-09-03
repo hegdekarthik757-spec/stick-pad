@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Mandatory for the Mac App Store. Without it the upload is rejected. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- "Save Note As...", "Save All Notes to a Folder...", "Add Image...",
+         backup and restore, and images dragged in from Finder. Everything the
+         user explicitly picks in an open/save panel or drops on a note. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- The note store and its attachments live inside the app container, so
+         no other file entitlement is needed. Deliberately absent:
+         com.apple.security.network.client / .server  - Stick Pad never
+         connects to anything, and asking for network access on an app that
+         advertises "nothing is uploaded anywhere" invites review questions. -->
+
+    <!-- The AES key. Replace TEAMID with your Apple Developer Team ID. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.example.stickpad</string>
+    </array>
+</dict>
+</plist>
