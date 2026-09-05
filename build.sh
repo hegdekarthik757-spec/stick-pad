@@ -22,9 +22,13 @@ VERSION="1.0"
 OUT="build"
 APP="$OUT/$APP_NAME.app"
 
-echo "==> Compiling ($EXECUTABLE, release)"
-swift build -c release --product StickPad
-BIN="$(swift build -c release --show-bin-path)/$EXECUTABLE"
+# Universal, so the app runs on both Apple silicon and Intel Macs. Building
+# only for the host would leave an Intel Mac unable to launch it at all.
+ARCHS=(--arch arm64 --arch x86_64)
+
+echo "==> Compiling ($EXECUTABLE, release, universal)"
+swift build -c release --product StickPad "${ARCHS[@]}"
+BIN="$(swift build -c release "${ARCHS[@]}" --show-bin-path)/$EXECUTABLE"
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
@@ -69,6 +73,9 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # along in the .pkg payload as an AppleDouble entry, which is normal — every
 # installed Mac app carries it.)
 xattr -cr "$APP" 2>/dev/null || true
+
+echo "==> Verifying architectures"
+lipo -info "$APP/Contents/MacOS/$EXECUTABLE"
 
 echo "==> Signing (ad-hoc)"
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
